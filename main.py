@@ -145,6 +145,17 @@ def extract_amount_and_tax(text: str):
         r"amount\s*\(excl\.?\s*(?:tax|gst|vat)\)",
         r"amount\s*before\s*tax",
         r"amount\s*excl\.?\s*(?:tax|gst|vat)",
+        r"invoice\s*amount",
+        r"invoice\s*value",
+        r"order\s*value",
+        r"bill(?:ed)?\s*amount",
+        r"item\s*total",
+        r"goods\s*value",
+        r"principal\s*amount",
+        r"amount",
+        r"price",
+        r"value",
+        r"cost",
     ], strict=True)
     if subtotal_val:
         m = re.search(NUM_RE, subtotal_val)
