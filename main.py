@@ -41,11 +41,23 @@ def clean_number(s: str):
         return None
 
 
-def find_label_value(text: str, labels, stop_at_newline=True):
-    """Find 'Label: value' style lines for any of the given label patterns."""
+def find_label_value(text: str, labels, stop_at_newline=True, strict=False):
+    """Find 'Label: value' style lines for any of the given label patterns,
+    anchored to the start of a line (ignoring leading whitespace).
+
+    strict=True adds a guard so the label can't match if immediately followed
+    by another word (e.g. 'Tax ID:' must NOT match a bare 'tax' pattern, and
+    'Total Pages:' must NOT match a bare 'total' pattern) -- only a separator,
+    digit, or currency symbol may follow. Use strict=True for generic/bare
+    fallback labels prone to colliding with compound phrases; leave it False
+    for specific labels (e.g. invoice number formats without a colon).
+    """
     for label in labels:
-        pattern = rf"{label}\s*[:\-]?\s*(.+)"
-        m = re.search(pattern, text, re.IGNORECASE)
+        if strict:
+            pattern = rf"^[ \t]*{label}[ \t]*(?=[:\-]|[ \t]*[\d$€£¥₹])[:\-]?[ \t]*(.+)$"
+        else:
+            pattern = rf"^[ \t]*{label}[ \t]*[:\-]?[ \t]*(.+)$"
+        m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
         if m:
             val = m.group(1).strip()
             if stop_at_newline:
@@ -127,9 +139,13 @@ def extract_amount_and_tax(text: str):
 
     subtotal_val = find_label_value(text, [
         r"sub\s*-?\s*total",
+        r"taxable\s*(?:value|amount)",
+        r"base\s*amount",
         r"net\s*amount",
-        r"amount(?:\s*before\s*tax)?",
-    ])
+        r"amount\s*\(excl\.?\s*(?:tax|gst|vat)\)",
+        r"amount\s*before\s*tax",
+        r"amount\s*excl\.?\s*(?:tax|gst|vat)",
+    ], strict=True)
     if subtotal_val:
         m = re.search(NUM_RE, subtotal_val)
         if m:
@@ -140,18 +156,25 @@ def extract_amount_and_tax(text: str):
         r"gst",
         r"vat\s*\([\d.]+%\)",
         r"vat",
-        r"tax(?:\s*\([\d.]+%\))?",
         r"sales\s*tax",
-    ])
+        r"tax\s*\([\d.]+%\)",
+        r"tax\s*amount",
+        r"total\s*tax",
+        r"tax",
+    ], strict=True)
     if tax_val:
         m = re.search(NUM_RE, tax_val)
         if m:
             tax = clean_number(m.group(0))
 
     total_val = find_label_value(text, [
-        r"total",
         r"grand\s*total",
-    ])
+        r"total\s*amount\s*due",
+        r"amount\s*due",
+        r"total\s*payable",
+        r"total\s*amount",
+        r"total",
+    ], strict=True)
     if total_val:
         m = re.search(NUM_RE, total_val)
         if m:
