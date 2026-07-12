@@ -1,4 +1,7 @@
 import re
+import os
+import json
+import requests
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +21,78 @@ app.add_middleware(
 
 class InvoiceRequest(BaseModel):
     invoice_text: str
+
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+
+SYSTEM_PROMPT = """You extract structured data from raw invoice text. Return ONLY a JSON object with exactly these 6 keys, no other text, no markdown fences:
+
+{
+  "invoice_no": string or null,
+  "date": string in YYYY-MM-DD format or null,
+  "vendor": string or null,
+  "amount": number or null,
+  "tax": number or null,
+  "currency": one of "USD","EUR","GBP","INR","JPY" or null
+}
+
+Rules:
+- amount is the SUBTOTAL / pre-tax amount, NOT the grand total. If only a total and a tax amount are given, compute amount = total - tax.
+- tax is the tax amount only (as a number), not a percentage.
+- date must be normalized to ISO format YYYY-MM-DD regardless of the input format.
+- currency should be inferred from symbols (₹, $, €, £, ¥) or words (rupees, dollars, euros, pounds, yen) or explicit ISO codes.
+- Use null for any field that cannot be determined from the text.
+- Return ONLY the JSON object, nothing else."""
+
+
+def extract_via_llm(text: str):
+    if not GROQ_API_KEY:
+        return None
+    try:
+        resp = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        data = json.loads(content)
+
+        result = {
+            "invoice_no": data.get("invoice_no"),
+            "date": data.get("date"),
+            "vendor": data.get("vendor"),
+            "amount": data.get("amount"),
+            "tax": data.get("tax"),
+            "currency": data.get("currency"),
+        }
+        # basic sanity checks
+        if result["amount"] is not None:
+            result["amount"] = float(result["amount"])
+        if result["tax"] is not None:
+            result["tax"] = float(result["tax"])
+        if result["date"]:
+            try:
+                datetime.strptime(result["date"], "%Y-%m-%d")
+            except ValueError:
+                result["date"] = None
+        return result
+    except Exception:
+        return None
 
 
 CURRENCY_SYMBOLS = {
@@ -229,6 +304,25 @@ def extract_currency(text: str):
 def extract(req: InvoiceRequest):
     text = req.invoice_text
 
+    llm_result = extract_via_llm(text)
+    if llm_result is not None:
+        # fill any nulls from regex as a safety net
+        regex_invoice_no = extract_invoice_no(text)
+        regex_date = extract_date(text)
+        regex_vendor = extract_vendor(text)
+        regex_amount, regex_tax = extract_amount_and_tax(text)
+        regex_currency = extract_currency(text)
+
+        return {
+            "invoice_no": llm_result["invoice_no"] or regex_invoice_no,
+            "date": llm_result["date"] or regex_date,
+            "vendor": llm_result["vendor"] or regex_vendor,
+            "amount": llm_result["amount"] if llm_result["amount"] is not None else regex_amount,
+            "tax": llm_result["tax"] if llm_result["tax"] is not None else regex_tax,
+            "currency": llm_result["currency"] or regex_currency,
+        }
+
+    # LLM unavailable or failed -- pure regex fallback
     invoice_no = extract_invoice_no(text)
     date = extract_date(text)
     vendor = extract_vendor(text)
